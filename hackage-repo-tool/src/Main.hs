@@ -249,7 +249,10 @@ bootstrapOrUpdate opts@GlobalOpts{..} keysLoc repoLoc isBootstrap = do
     tarGzInfo   <- computeFileInfo' repoLayoutIndexTarGz
     let snapshot = Snapshot {
             snapshotVersion     = versionInitial
-          , snapshotExpires     = expiresInDays now 3
+          , snapshotExpires     =
+            if globalNoExpire
+            then expiresNever
+            else expiresInDays now 3
           , snapshotInfoRoot    = rootInfo
           , snapshotInfoMirrors = mirrorsInfo
           , snapshotInfoTar     = Just tarInfo
@@ -266,7 +269,10 @@ bootstrapOrUpdate opts@GlobalOpts{..} keysLoc repoLoc isBootstrap = do
     snapshotInfo <- computeFileInfo' repoLayoutSnapshot
     let timestamp = Timestamp {
             timestampVersion      = versionInitial
-          , timestampExpires      = expiresInDays now 3
+          , timestampExpires      =
+            if globalNoExpire
+            then expiresNever
+            else expiresInDays now 3
           , timestampInfoSnapshot = snapshotInfo
           }
     updateFile opts
@@ -304,7 +310,10 @@ updateRoot opts repoLoc whenWrite keys now =
     root :: Root
     root = Root {
         rootVersion = versionInitial
-      , rootExpires = expiresInDays now (globalExpireRoot opts * 365)
+      , rootExpires =
+        if globalNoExpire opts
+        then expiresNever
+        else expiresInDays now (globalExpireRoot opts * 365)
       , rootKeys    = KeyEnv.fromKeys $ concat [
                           privateRoot      keys
                         , privateTarget    keys
@@ -355,7 +364,10 @@ updateMirrors opts repoLoc whenWrite keys now uris =
     mirrors :: Mirrors
     mirrors = Mirrors {
         mirrorsVersion = versionInitial
-      , mirrorsExpires = expiresInDays now (globalExpireMirrors opts * 365)
+      , mirrorsExpires =
+        if globalNoExpire opts
+        then expiresNever
+        else expiresInDays now (globalExpireMirrors opts * 365)
       , mirrorsMirrors = map mkMirror uris
       }
 

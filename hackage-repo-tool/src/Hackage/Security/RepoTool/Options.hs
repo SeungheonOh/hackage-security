@@ -41,6 +41,10 @@ data GlobalOpts = GlobalOpts {
     -- | Expiry time when creating mirrors (in years)
   , globalExpireMirrors :: Integer
 
+
+    -- | Disable expiration
+  , globalNoExpire :: Bool
+
     -- | Command to execute
   , globalCommand :: Command
   }
@@ -174,6 +178,10 @@ parseGlobalOptions = GlobalOpts
         , help "Expiry time for the mirrors"
         , value 10
         , showDefault
+        ])
+  <*> (switch $ mconcat [
+          long "no-expire"
+        , help "Make signatures valid indefinitely. Overrides other expiration config"
         ])
   <*> (subparser $ mconcat [
           command "create-keys" $ info (helper <*> parseCreateKeys) $
