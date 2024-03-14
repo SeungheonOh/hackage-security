@@ -20,6 +20,8 @@ import qualified Data.ByteString.Lazy              as BS.L
 import           Data.Typeable
 import qualified System.Directory                  as Directory
 import           System.IO.Error
+import           Data.Time
+import           Data.Time.Calendar.OrdinalDate
 
 -- hackage-security
 import           Hackage.Security.Util.Path
@@ -39,21 +41,21 @@ import           Data.Time.Clock.POSIX             (utcTimeToPOSIXSeconds)
 -- | Get the modification time of the specified file
 --
 -- Returns 0 if the file does not exist .
-getFileModTime :: GlobalOpts -> RepoLoc -> TargetPath' -> IO EpochTime
+getFileModTime :: GlobalOpts -> RepoLoc -> TargetPath' -> IO (EpochTime, UTCTime)
 getFileModTime opts repoLoc targetPath =
-    handle handler $
+    handle handler $ do
+      utc <- Directory.getModificationTime (toFilePath fp)
       -- Underlying implementation of 'Directory.getModificationTime' converts
       -- from POSIX seconds, so there shouldn't be loss of precision.
       -- NB: Apparently, this has low clock resolution on GHC < 7.8.
       -- I don't think we care.
-      fromInteger . floor . utcTimeToPOSIXSeconds
-        <$> Directory.getModificationTime (toFilePath fp)
+      pure (fromInteger $ floor $ utcTimeToPOSIXSeconds utc, utc)
   where
     fp :: Path Absolute
     fp = anchorTargetPath' opts repoLoc targetPath
 
-    handler :: IOException -> IO EpochTime
-    handler ex = if isDoesNotExistError ex then return 0
+    handler :: IOException -> IO (EpochTime, UTCTime)
+    handler ex = if isDoesNotExistError ex then return (0, UTCTime (fromOrdinalDate 0 0) 0)
                                            else throwIO ex
 
 compress :: Path Absolute -> Path Absolute -> IO ()

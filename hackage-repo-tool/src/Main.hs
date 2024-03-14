@@ -7,11 +7,13 @@ import Data.List (nub)
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Time
 import GHC.Conc.Sync (setUncaughtExceptionHandler)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Network.URI (URI)
 import System.Exit
 import qualified Data.ByteString.Lazy as BS.L
 import qualified Lens.Micro           as Lens
 import qualified System.FilePath      as FilePath
+import qualified System.Directory     as Dir
 
 #ifndef mingw32_HOST_OS
 import System.IO.Error (isAlreadyExistsError)
@@ -225,6 +227,7 @@ bootstrapOrUpdate opts@GlobalOpts{..} keysLoc repoLoc isBootstrap = do
         -- If we are recreating all files, also recreate the index
         _didExist <- handleDoesNotExist $ removeFile pathIndexTar
         logInfo opts $ "Writing " ++ prettyRepo repoLayoutIndexTar
+        print $ newFiles
       (WriteUpdate, True) -> do
         logInfo opts $ "Skipping " ++ prettyRepo repoLayoutIndexTar
       (WriteUpdate, False) ->
@@ -264,6 +267,7 @@ bootstrapOrUpdate opts@GlobalOpts{..} keysLoc repoLoc isBootstrap = do
                (InRep repoLayoutSnapshot)
                (withSignatures globalRepoLayout (privateSnapshot keys))
                snapshot
+               Nothing
 
     -- Finally, create the timestamp
     snapshotInfo <- computeFileInfo' repoLayoutSnapshot
@@ -281,6 +285,7 @@ bootstrapOrUpdate opts@GlobalOpts{..} keysLoc repoLoc isBootstrap = do
                (InRep repoLayoutTimestamp)
                (withSignatures globalRepoLayout (privateTimestamp keys))
                timestamp
+               Nothing
   where
     pathIndexTar :: Path Absolute
     pathIndexTar = anchorRepoPath opts repoLoc repoLayoutIndexTar
@@ -306,6 +311,7 @@ updateRoot opts repoLoc whenWrite keys now =
                (InRep repoLayoutRoot)
                (withSignatures' (privateRoot keys))
                root
+               Nothing
   where
     root :: Root
     root = Root {
@@ -360,6 +366,7 @@ updateMirrors opts repoLoc whenWrite keys now uris =
                (InRep repoLayoutMirrors)
                (withSignatures' (privateMirrors keys))
                mirrors
+               Nothing
   where
     mirrors :: Mirrors
     mirrors = Mirrors {
@@ -377,8 +384,9 @@ updateMirrors opts repoLoc whenWrite keys now uris =
 -- | Create package metadata
 createPackageMetadata :: GlobalOpts -> RepoLoc -> WhenWrite -> PackageIdentifier -> IO ()
 createPackageMetadata opts repoLoc whenWrite pkgId = do
-    srcTS <- getFileModTime opts repoLoc src
-    dstTS <- getFileModTime opts repoLoc dst
+    (srcTS, srcUTCTS) <- getFileModTime opts repoLoc src
+    (dstTS, _) <- getFileModTime opts repoLoc dst
+
     let skip = case whenWrite of
                  WriteInitial -> False
                  WriteUpdate  -> dstTS >= srcTS
@@ -401,6 +409,7 @@ createPackageMetadata opts repoLoc whenWrite pkgId = do
                    dst
                    (withSignatures' [])
                    targets
+                   (Just $ srcUTCTS)
   where
     computeFileMapEntry :: TargetPath' -> IO (TargetPath, FileInfo)
     computeFileMapEntry file = do
@@ -423,7 +432,7 @@ createPackageMetadata opts repoLoc whenWrite pkgId = do
 -- | Find the files we need to add to the index
 findNewIndexFiles :: GlobalOpts -> RepoLoc -> WhenWrite -> IO [IndexPath]
 findNewIndexFiles opts@GlobalOpts{..} repoLoc whenWrite = do
-    indexTS    <- getFileModTime opts repoLoc (InRep repoLayoutIndexTar)
+    (indexTS,_)    <- getFileModTime opts repoLoc (InRep repoLayoutIndexTar)
     indexFiles <- getRecursiveContents absIndexDir
 
     let indexFiles' :: [IndexPath]
@@ -433,7 +442,7 @@ findNewIndexFiles opts@GlobalOpts{..} repoLoc whenWrite = do
       WriteInitial -> return indexFiles'
       WriteUpdate  -> liftM catMaybes $
         forM indexFiles' $ \indexFile -> do
-          fileTS <- getFileModTime opts repoLoc $ InIdx (const indexFile)
+          (fileTS, _) <- getFileModTime opts repoLoc $ InIdx (const indexFile)
           if fileTS > indexTS then return $ Just indexFile
                               else return Nothing
   where
@@ -443,8 +452,8 @@ findNewIndexFiles opts@GlobalOpts{..} repoLoc whenWrite = do
 -- | Extract the cabal file from the package tarball and copy it to the index
 extractCabalFile :: GlobalOpts -> RepoLoc -> WhenWrite -> PackageIdentifier -> IO ()
 extractCabalFile opts@GlobalOpts{..} repoLoc whenWrite pkgId = do
-    srcTS <- getFileModTime opts repoLoc src
-    dstTS <- getFileModTime opts repoLoc dst
+    (srcTS, srcUTCTS) <- getFileModTime opts repoLoc src
+    (dstTS, _) <- getFileModTime opts repoLoc dst
     let skip = case whenWrite of
                  WriteInitial -> False
                  WriteUpdate  -> dstTS >= srcTS
@@ -465,6 +474,9 @@ extractCabalFile opts@GlobalOpts{..} repoLoc whenWrite pkgId = do
                         ++ prettyTargetPath' opts src
                         ++ ")"
             withFile pathCabalInIdx WriteMode $ \h -> BS.L.hPut h cabalFile
+            filePath <- toAbsoluteFilePath pathCabalInIdx
+            Dir.setModificationTime filePath srcUTCTS
+
   where
     pathCabalInTar :: FilePath
     pathCabalInTar = FilePath.joinPath [
@@ -508,8 +520,9 @@ updateFile :: forall a. (ToJSON WriteJSON a, HasHeader a)
            -> TargetPath'
            -> (a -> Signed a)          -- ^ Signing function
            -> a                        -- ^ Unsigned file contents
+           -> Maybe UTCTime                  -- ^ Timestamp
            -> IO ()
-updateFile opts@GlobalOpts{..} repoLoc whenWrite fileLoc signPayload a = do
+updateFile opts@GlobalOpts{..} repoLoc whenWrite fileLoc signPayload a timestamp = do
     mOldHeader :: Maybe (Either DeserializationError (UninterpretedSignatures Header)) <-
       handleDoesNotExist $ readJSON_NoKeys_NoLayout fp
 
@@ -559,6 +572,12 @@ updateFile opts@GlobalOpts{..} repoLoc whenWrite fileLoc signPayload a = do
       createDirectoryIfMissing True (takeDirectory fp)
       writeJSON globalRepoLayout fp (signPayload doc)
 
+      case timestamp of
+        Just ts -> do
+          filePath <- toAbsoluteFilePath fp
+          Dir.setModificationTime filePath ts
+        Nothing -> pure ()
+
     fp :: Path Absolute
     fp = anchorTargetPath' opts repoLoc fileLoc
 
@@ -580,8 +599,8 @@ updateFile opts@GlobalOpts{..} repoLoc whenWrite fileLoc signPayload a = do
 -- We can then verify that this list of packages actually matches the layout as
 -- a separate step.
 findPackages :: GlobalOpts -> RepoLoc -> IO [PackageIdentifier]
-findPackages GlobalOpts{..} (RepoLoc repoLoc) =
-    nub . mapMaybe isPackage <$> getRecursiveContents repoLoc
+findPackages opts@GlobalOpts{..} loc@(RepoLoc repoLoc) =
+  nub . mapMaybe isPackage <$> getRecursiveContents repoLoc
   where
     isPackage :: Path Unrooted -> Maybe PackageIdentifier
     isPackage path = do
